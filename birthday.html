@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Gravity & Fireworks</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background-color: #000;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            user-select: none;
+            cursor: none; /* 沉浸式，隐藏鼠标 */
+            font-family: 'Orbitron', sans-serif;
+        }
+
+        /* 启动遮罩：为了通过浏览器的音频自动播放策略 */
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 0.8s;
+            color: cyan;
+        }
+
+        #start-btn {
+            background: transparent;
+            color: cyan;
+            border: 2px solid cyan;
+            padding: 15px 40px;
+            font-size: 20px;
+            letter-spacing: 3px;
+            cursor: pointer;
+            box-shadow: 0 0 15px cyan;
+            font-family: inherit;
+            text-transform: uppercase;
+        }
+        #start-btn:hover { background: cyan; color: #000; }
+
+        .hint {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.3);
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <button id="start-btn">点击启动系统</button>
+        <p style="margin-top: 15px; font-size: 12px; opacity: 0.7;">CLICK TO INITIALIZE AUDIO & MIC</p>
+    </div>
+
+    <div class="hint" id="statusText">等待指令... (说 "生日快乐")</div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // ================= 配置区域 =================
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        
+        let flowParticles = []; // 第一版：流场粒子
+        let fireworks = [];     // 烟花弹
+        let sparks = [];        // 爆炸碎片
+        
+        let hue = 0;
+        let isPartyMode = false; // 是否开启烟花模式
+        let shaker = 0;          // 屏幕震动值
+
+        // 鼠标交互
+        const mouse = { x: undefined, y: undefined, radius: 200 };
+
+        // ================= 音频引擎 (Web Audio API) =================
+        // 纯代码合成爆炸声，无需素材
+        let audioCtx;
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playBoom() {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            
+            // 制造白噪声
+            const bufferSize = audioCtx.sampleRate * 2; 
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            
+            // 滤波器 (低通，模拟闷响)
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 800;
+            filter.frequency.exponentialRampToValueAtTime(100, t + 1);
+
+            // 音量包络
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0, t);
+            gain.gain.linearRampToValueAtTime(1.5, t + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.01, t + 1.5);
+
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start(t);
+        }
+
+        // ================= 第一版：流场粒子类 =================
+        class FlowParticle {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.size = Math.random() * 2 + 0.1;
+                this.baseSpeedX = Math.random() * 3 - 1.5;
+                this.baseSpeedY = Math.random() * 3 - 1.5;
+                this.speedX = this.baseSpeedX;
+                this.speedY = this.baseSpeedY;
+            }
+            update() {
+                // 派对模式下，背景粒子稍微加速，渲染氛围
+                const speedMult = isPartyMode ? 3 : 1;
+                this.x += this.speedX * speedMult;
+                this.y += this.speedY * speedMult;
+
+                // 边界反弹
+                if (this.x > width || this.x < 0) { this.speedX *= -1; this.baseSpeedX *= -1; }
+                if (this.y > height || this.y < 0) { this.speedY *= -1; this.baseSpeedY *= -1; }
+
+                // 鼠标交互 (核心功能)
+                if (mouse.x != undefined) {
+                    let dx = mouse.x - this.x;
+                    let dy = mouse.y - this.y;
+                    let distance = Math.sqrt(dx*dx + dy*dy);
+                    if (distance < mouse.radius) {
+                        const force = (mouse.radius - distance) / mouse.radius;
+                        const fx = dx/distance * force * 5;
+                        const fy = dy/distance * force * 5;
+                        this.speedX -= fx;
+                        this.speedY -= fy;
+                    } else {
+                        // 惯性恢复
+                        if (this.speedX !== this.baseSpeedX) this.speedX -= (this.speedX - this.baseSpeedX) * 0.05;
+                        if (this.speedY !== this.baseSpeedY) this.speedY -= (this.speedY - this.baseSpeedY) * 0.05;
+                    }
+                }
+                // 颜色
+                this.color = `hsl(${hue}, 100%, 50%)`;
+            }
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // ================= 第三版：烟花类 =================
+        class Firework {
+            constructor() {
+                this.x = Math.random() * width * 0.8 + width * 0.1;
+                this.y = height;
+                this.targetY = Math.random() * height * 0.5;
+                this.speed = Math.random() * 4 + 10;
+                this.angle = -Math.PI / 2 + (Math.random() * 0.2 - 0.1);
+                this.vx = Math.cos(this.angle) * this.speed;
+                this.vy = Math.sin(this.angle) * this.speed;
+                this.hue = Math.random() * 360;
+                this.trail = [];
+                this.exploded = false;
+            }
+            update() {
+                this.trail.push({x: this.x, y: this.y});
+                if(this.trail.length > 5) this.trail.shift();
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.2; // 重力
+
+                if (this.vy >= 0 || this.y <= this.targetY) {
+                    this.exploded = true;
+                    // 爆炸逻辑：声音 + 震动 + 碎片
+                    playBoom();
+                    if(navigator.vibrate) navigator.vibrate(100); 
+                    shaker = 10; // 屏幕震动幅度
+                    createExplosion(this.x, this.y, this.hue);
+                }
+            }
+            draw() {
+                ctx.strokeStyle = `hsl(${this.hue}, 100%, 60%)`;
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                this.trail.forEach((p, i) => {
+                    if(i===0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                });
+                ctx.stroke();
+            }
+        }
+
+        class Spark {
+            constructor(x, y, hue) {
+                this.x = x; this.y = y;
+                this.hue = hue + Math.random()*40 - 20;
+                const a = Math.random() * Math.PI * 2;
+                const v = Math.random() * 8 + 2;
+                this.vx = Math.cos(a) * v;
+                this.vy = Math.sin(a) * v;
+                this.life = 1;
+                this.decay = Math.random() * 0.015 + 0.005;
+                this.gravity = 0.15;
+            }
+            update() {
+                this.vx *= 0.96; this.vy *= 0.96;
+                this.vy += this.gravity;
+                this.x += this.vx; this.y += this.vy;
+                this.life -= this.decay;
+            }
+            draw() {
+                ctx.globalAlpha = this.life;
+                ctx.fillStyle = `hsl(${this.hue}, 100%, 70%)`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 2, 0, Math.PI*2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        function createExplosion(x, y, hue) {
+            for(let i=0; i<80; i++) sparks.push(new Spark(x, y, hue));
+        }
+
+        // ================= 逻辑控制 =================
+        function init() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            
+            // 初始化第一版的粒子
+            flowParticles = [];
+            const count = (width * height) / 4000;
+            for(let i=0; i<count; i++) flowParticles.push(new FlowParticle());
+        }
+
+        function animate() {
+            // 震动计算
+            let tx = 0, ty = 0;
+            if(shaker > 0) {
+                tx = (Math.random() - 0.5) * shaker;
+                ty = (Math.random() - 0.5) * shaker;
+                shaker *= 0.9;
+                if(shaker < 0.5) shaker = 0;
+            }
+
+            // 1. 拖尾清除 (制造流动感)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.save();
+            ctx.translate(tx, ty); // 应用震动
+
+            // 2. 绘制第一版背景粒子 (Normal 模式)
+            ctx.globalCompositeOperation = 'source-over';
+            flowParticles.forEach(p => { p.update(); p.draw(); });
+            // 连线逻辑 (保留第一版的精致感)
+            if(!isPartyMode) { // 烟花开始后减少连线计算，保证流畅
+                for (let i = 0; i < flowParticles.length; i+=3) { 
+                    for(let j = i+1; j < flowParticles.length; j+=10) {
+                        let dx = flowParticles[i].x - flowParticles[j].x;
+                        let dy = flowParticles[i].y - flowParticles[j].y;
+                        if(Math.abs(dx) < 80 && Math.abs(dy) < 80) {
+                             ctx.strokeStyle = flowParticles[i].color;
+                             ctx.globalAlpha = 0.2;
+                             ctx.beginPath();
+                             ctx.moveTo(flowParticles[i].x, flowParticles[i].y);
+                             ctx.lineTo(flowParticles[j].x, flowParticles[j].y);
+                             ctx.stroke();
+                             ctx.globalAlpha = 1;
+                        }
+                    }
+                }
+            }
+
+            // 3. 绘制烟花 (Lighter 模式 - 只有开启Party才执行)
+            if(isPartyMode) {
+                ctx.globalCompositeOperation = 'lighter'; // 关键：让烟花发光
+                
+                // 持续发射逻辑
+                if(Math.random() < 0.05) { // 5%的几率每帧发射，调节这里控制密度
+                    fireworks.push(new Firework());
+                }
+
+                fireworks.forEach((f, i) => {
+                    f.update(); f.draw();
+                    if(f.exploded) fireworks.splice(i, 1);
+                });
+                
+                sparks.forEach((s, i) => {
+                    s.update(); s.draw();
+                    if(s.life <= 0) sparks.splice(i, 1);
+                });
+
+                // 中间文字
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.shadowColor = `hsl(${hue}, 100%, 50%)`;
+                ctx.shadowBlur = 20;
+                ctx.fillStyle = "#fff";
+                ctx.textAlign = "center";
+                ctx.font = "bold 60px Orbitron";
+                ctx.fillText("HAPPY BIRTHDAY", width/2, height/2);
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.restore();
+            hue += 0.5;
+            requestAnimationFrame(animate);
+        }
+
+        // ================= 语音识别 =================
+        function startListening() {
+            const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if(!Speech) return alert("请使用 Chrome 浏览器");
+
+            const rec = new Speech();
+            rec.lang = 'zh-CN';
+            rec.continuous = true;
+            rec.interimResults = false;
+
+            rec.onstart = () => document.getElementById('statusText').innerText = "系统监听中... 请说 '生日快乐'";
+            
+            rec.onresult = (e) => {
+                const cmd = e.results[e.results.length-1][0].transcript.toLowerCase();
+                console.log("Heard:", cmd);
+                // 触发词
+                if(cmd.includes('生日快乐') || cmd.includes('birthday')) {
+                    if(!isPartyMode) {
+                        isPartyMode = true; // 永久开启，直到刷新
+                        document.getElementById('statusText').innerText = "PARTY MODE ACTIVATED!";
+                        // 立即发射一波以示庆祝
+                        for(let i=0; i<5; i++) setTimeout(()=>fireworks.push(new Firework()), i*200);
+                    }
+                }
+            };
+            rec.onend = () => rec.start(); // 断开自动重连
+            rec.start();
+        }
+
+        // ================= 启动 =================
+        window.addEventListener('resize', init);
+        window.addEventListener('mousemove', e => { mouse.x = e.x; mouse.y = e.y; });
+        
+        document.getElementById('start-btn').addEventListener('click', () => {
+            const overlay = document.getElementById('overlay');
+            overlay.style.opacity = 0;
+            setTimeout(() => overlay.remove(), 800);
+            
+            initAudio(); // 准备音效
+            init();      // 准备画面
+            animate();   // 开始动画
+            startListening(); // 开始听
+        });
+
+    </script>
+</body>
+</html>
